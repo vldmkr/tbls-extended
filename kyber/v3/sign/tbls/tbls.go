@@ -25,26 +25,26 @@ import (
 type SigShare []byte
 
 // Index returns the index i of the TBLS share Si.
-func (s SigShare) Index() (int, error) {
-	var index uint16
+func (s SigShare) Index() (share.ShareIndex, error) {
+	var index share.ShareIndex
 	buf := bytes.NewReader(s)
 	err := binary.Read(buf, binary.BigEndian, &index)
 	if err != nil {
-		return -1, err
+		return share.ShareIndex{}, err
 	}
-	return int(index), nil
+	return index, nil
 }
 
 // Value returns the value v of the TBLS share Si.
 func (s *SigShare) Value() []byte {
-	return []byte(*s)[2:]
+	return []byte(*s)[share.ShareIndexSize:]
 }
 
 // Sign creates a threshold BLS signature Si = xi * H(m) on the given message m
 // using the provided secret key share xi.
 func Sign(suite pairing.Suite, private *share.PriShare, msg []byte) ([]byte, error) {
 	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.BigEndian, uint16(private.I)); err != nil {
+	if err := binary.Write(buf, binary.BigEndian, private.I); err != nil {
 		return nil, err
 	}
 	s, err := bls.Sign(suite, private.V, msg)

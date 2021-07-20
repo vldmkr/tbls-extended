@@ -10,11 +10,13 @@
 package share
 
 import (
+	"bytes"
 	"crypto/cipher"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -25,9 +27,23 @@ import (
 var errorGroups = errors.New("non-matching groups")
 var errorCoeffs = errors.New("different number of coefficients")
 
+const ShareIndexSize = 32
+
+type ShareIndex [ShareIndexSize]byte
+
+func NewShareIndex(i int) ShareIndex {
+	var index [ShareIndexSize]byte
+	big.NewInt(int64(i)).FillBytes(index[:])
+	return index
+}
+
+func (i ShareIndex) Less(j ShareIndex) bool {
+	return bytes.Compare(i[:], j[:]) == -1
+}
+
 // PriShare represents a private share.
 type PriShare struct {
-	I int          // Index of the private share
+	I ShareIndex   // Index of the private share
 	V kyber.Scalar // Value of the private share
 }
 
@@ -81,8 +97,9 @@ func (p *PriPoly) Secret() kyber.Scalar {
 }
 
 // Eval computes the private share v = p(i).
-func (p *PriPoly) Eval(i int) *PriShare {
-	xi := p.g.Scalar().SetInt64(1 + int64(i))
+func (p *PriPoly) Eval(i ShareIndex) *PriShare {
+	xi := p.g.Scalar().SetBytes(i[:])
+	xi = xi.Add(xi, p.g.Scalar().One())
 	v := p.g.Scalar().Zero()
 	for j := p.Threshold() - 1; j >= 0; j-- {
 		v.Mul(v, xi)
@@ -95,7 +112,7 @@ func (p *PriPoly) Eval(i int) *PriShare {
 func (p *PriPoly) Shares(n int) []*PriShare {
 	shares := make([]*PriShare, n)
 	for i := range shares {
-		shares[i] = p.Eval(i)
+		shares[i] = p.Eval(NewShareIndex(i))
 	}
 	return shares
 }
@@ -209,12 +226,12 @@ type byIndexScalar []*PriShare
 
 func (s byIndexScalar) Len() int           { return len(s) }
 func (s byIndexScalar) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-func (s byIndexScalar) Less(i, j int) bool { return s[i].I < s[j].I }
+func (s byIndexScalar) Less(i, j int) bool { return s[i].I.Less(s[j].I) }
 
 // xyScalar returns the list of (x_i, y_i) pairs indexed. The first map returned
 // is the list of x_i and the second map is the list of y_i, both indexed in
 // their respective map at index i.
-func xyScalar(g kyber.Group, shares []*PriShare, t, n int) (map[int]kyber.Scalar, map[int]kyber.Scalar) {
+func xyScalar(g kyber.Group, shares []*PriShare, t, n int) (map[ShareIndex]kyber.Scalar, map[ShareIndex]kyber.Scalar) {
 	// we are sorting first the shares since the shares may be unrelated for
 	// some applications. In this case, all participants needs to interpolate on
 	// the exact same order shares.
@@ -226,14 +243,15 @@ func xyScalar(g kyber.Group, shares []*PriShare, t, n int) (map[int]kyber.Scalar
 	}
 	sort.Sort(byIndexScalar(sorted))
 
-	x := make(map[int]kyber.Scalar)
-	y := make(map[int]kyber.Scalar)
+	x := make(map[ShareIndex]kyber.Scalar)
+	y := make(map[ShareIndex]kyber.Scalar)
 	for _, s := range sorted {
-		if s == nil || s.V == nil || s.I < 0 {
+		if s == nil || s.V == nil {
 			continue
 		}
 		idx := s.I
-		x[idx] = g.Scalar().SetInt64(int64(idx + 1))
+		x[idx] = g.Scalar().SetBytes(idx[:])
+		x[idx].Add(x[idx], g.Scalar().One())
 		y[idx] = s.V
 		if len(x) == t {
 			break
@@ -296,7 +314,7 @@ func (p *PriPoly) String() string {
 
 // PubShare represents a public share.
 type PubShare struct {
-	I int         // Index of the public share
+	I ShareIndex  // Index of the public share
 	V kyber.Point // Value of the public share
 }
 
@@ -336,8 +354,9 @@ func (p *PubPoly) Commit() kyber.Point {
 }
 
 // Eval computes the public share v = p(i).
-func (p *PubPoly) Eval(i int) *PubShare {
-	xi := p.g.Scalar().SetInt64(1 + int64(i)) // x-coordinate of this share
+func (p *PubPoly) Eval(i ShareIndex) *PubShare {
+	xi := p.g.Scalar().SetBytes(i[:])
+	xi = xi.Add(xi, p.g.Scalar().One())
 	v := p.g.Point().Null()
 	for j := p.Threshold() - 1; j >= 0; j-- {
 		v.Mul(xi, v)
@@ -350,7 +369,7 @@ func (p *PubPoly) Eval(i int) *PubShare {
 func (p *PubPoly) Shares(n int) []*PubShare {
 	shares := make([]*PubShare, n)
 	for i := range shares {
-		shares[i] = p.Eval(i)
+		shares[i] = p.Eval(NewShareIndex(i))
 	}
 	return shares
 }
@@ -406,10 +425,10 @@ type byIndexPub []*PubShare
 
 func (s byIndexPub) Len() int           { return len(s) }
 func (s byIndexPub) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-func (s byIndexPub) Less(i, j int) bool { return s[i].I < s[j].I }
+func (s byIndexPub) Less(i, j int) bool { return s[i].I.Less(s[j].I) }
 
 // xyCommits is the public version of xScalars.
-func xyCommit(g kyber.Group, shares []*PubShare, t, n int) (map[int]kyber.Scalar, map[int]kyber.Point) {
+func xyCommit(g kyber.Group, shares []*PubShare, t, n int) (map[ShareIndex]kyber.Scalar, map[ShareIndex]kyber.Point) {
 	// we are sorting first the shares since the shares may be unrelated for
 	// some applications. In this case, all participants needs to interpolate on
 	// the exact same order shares.
@@ -421,15 +440,15 @@ func xyCommit(g kyber.Group, shares []*PubShare, t, n int) (map[int]kyber.Scalar
 	}
 	sort.Sort(byIndexPub(sorted))
 
-	x := make(map[int]kyber.Scalar)
-	y := make(map[int]kyber.Point)
-
+	x := make(map[ShareIndex]kyber.Scalar)
+	y := make(map[ShareIndex]kyber.Point)
 	for _, s := range sorted {
-		if s == nil || s.V == nil || s.I < 0 {
+		if s == nil || s.V == nil {
 			continue
 		}
 		idx := s.I
-		x[idx] = g.Scalar().SetInt64(int64(idx + 1))
+		x[idx] = g.Scalar().SetBytes(idx[:])
+		x[idx].Add(x[idx], g.Scalar().One())
 		y[idx] = s.V
 		if len(x) == t {
 			break
@@ -504,7 +523,7 @@ func RecoverPubPoly(g kyber.Group, shares []*PubShare, t, n int) (*PubPoly, erro
 // lagrangeBasis returns a PriPoly containing the Lagrange coefficients for the
 // i-th position. xs is a mapping between the indices and the values that the
 // interpolation is using, computed with xyScalar().
-func lagrangeBasis(g kyber.Group, i int, xs map[int]kyber.Scalar) *PriPoly {
+func lagrangeBasis(g kyber.Group, i ShareIndex, xs map[ShareIndex]kyber.Scalar) *PriPoly {
 	var basis = &PriPoly{
 		g:      g,
 		coeffs: []kyber.Scalar{g.Scalar().One()},
